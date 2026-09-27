@@ -90,15 +90,15 @@ def split_audio(audio_dir):
     return train, validation
 
 
-def set_time_strides(model, strides):
-    for stage, time_stride in zip(model.conv.conv, strides):
+def set_student_strides(model):
+    for stage, time_stride in zip(model.conv.conv, TIME_STRIDES):
         stage.conv1.stride = (2, time_stride)
         stage.conv3.stride = (2, time_stride)
 
 
 def prepare_student(student):
     student.requires_grad_(False)
-    set_time_strides(student, TIME_STRIDES)
+    set_student_strides(student)
     student.conv.requires_grad_(True)
 
 
@@ -165,12 +165,11 @@ def load_adapter(student, path):
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     if checkpoint.get("format_version") != 1 or checkpoint.get("student_mel_hop") != 480:
         raise ValueError(f"Unsupported student checkpoint: {path}")
-    strides = tuple(checkpoint["student_time_strides"])
-    if strides not in ((1, 2), (2, 1)):
-        raise ValueError(f"Unsupported student strides: {strides}")
+    if tuple(checkpoint["student_time_strides"]) != TIME_STRIDES:
+        raise ValueError(f"Checkpoint is not the configured 50 FPS student: {path}")
     if checkpoint.get("last_layers"):
         raise ValueError("This script supports frontend-only student checkpoints")
-    set_time_strides(student, strides)
+    set_student_strides(student)
     student.conv.load_state_dict(checkpoint["frontend"])
     return checkpoint
 
