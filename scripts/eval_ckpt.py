@@ -25,10 +25,16 @@ def main():
     p.add_argument("--limit-tracks", type=int, default=0, help="debug: first N tracks")
     p.add_argument("--gpu", type=int, default=1)
     p.add_argument("--no-dbn", action="store_true")
+    p.add_argument("--cache-dir", type=str, default=None, help="audio cache directory for wav input")
+    p.add_argument("--spect-fps", type=int, choices=[50, 100], default=None,
+                   help="override checkpoint spectrogram rate to compare the same weights without retraining")
     p.add_argument("--num-workers", type=int, default=4)
     args = p.parse_args()
 
-    model = PLBeatFM.load_from_checkpoint(args.ckpt, map_location="cpu", dbn=not args.no_dbn)
+    overrides = {"dbn": not args.no_dbn}
+    if args.spect_fps is not None:
+        overrides["spect_fps"] = args.spect_fps
+    model = PLBeatFM.load_from_checkpoint(args.ckpt, map_location="cpu", **overrides)
     input_type = model.hparams.input_type
 
     _, val_rows, test_rows = split_rows(read_manifest(args.manifest), args.fold, args.val_ratio, args.seed)
@@ -39,7 +45,7 @@ def main():
         rows = rows[:args.limit_tracks]
     print(f"ckpt {args.ckpt} | input {input_type} | {args.split} tracks {len(rows)}")
 
-    test_dl = DataLoader(PieceDataset(rows, input_type=input_type), batch_size=1,
+    test_dl = DataLoader(PieceDataset(rows, cache_dir=args.cache_dir, input_type=input_type), batch_size=1,
                          collate_fn=first, num_workers=args.num_workers)
     cuda = torch.cuda.is_available()
     trainer = Trainer(accelerator="gpu" if cuda else "cpu", devices=[args.gpu] if cuda else 1, logger=False)

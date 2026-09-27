@@ -33,11 +33,15 @@ def first(batch):
 
 class PLBeatFM(LightningModule):
     def __init__(self, lr=3e-4, layers=None, hidden_dim=512, classifier="mlp", embed_dim=16,
-                 dbn=True, chunk_sec=0.0, trim_sec=5.0, input_type="wav", dbn_fps=50):
+                 kernel_size=3, dilations=(1, 2, 4, 8),
+                 dbn=True, chunk_sec=0.0, trim_sec=5.0, input_type="wav", dbn_fps=50,
+                 spect_fps=100, student_adapter=None):
         super().__init__()
         self.save_hyperparameters()
         self.model = BeatFM(layers=layers, hidden_dim=hidden_dim, classifier=classifier, embed_dim=embed_dim,
-                            input_type=input_type)
+                            kernel_size=kernel_size, dilations=tuple(dilations),
+                            input_type=input_type, spect_fps=spect_fps,
+                            student_adapter=student_adapter)
         self.per_frame = RATE[input_type] // FPS                             # input steps per output frame
         self.dbn = None
         if dbn:
@@ -154,6 +158,10 @@ def main():
     p.add_argument("--manifest", required=True)
     p.add_argument("--input", choices=["wav", "spect"], default="wav",
                    help="wav: audio -> MusicFM mel / spect: Beat This spectrogram converted to MusicFM mel")
+    p.add_argument("--spect-fps", type=int, choices=[50, 100], default=100,
+                   help="MusicFM mel frame rate for spect input; 50 interpolates encoder features to 25 fps")
+    p.add_argument("--student-adapter", default=None,
+                   help="distilled 50 fps MusicFM adapter; requires --input spect --spect-fps 50")
     p.add_argument("--cache-dir", default=None, help="wav only: where 24 kHz mono .npy copies are stored")
     p.add_argument("--fold", type=int, default=0, help="8-fold CV fold held out for testing")
     p.add_argument("--gpu", type=int, default=0)
@@ -163,6 +171,10 @@ def main():
     p.add_argument("--max-epochs", type=int, default=1000)
     p.add_argument("--val-ratio", type=float, default=0.1, help="fraction of training pieces for validation")
     p.add_argument("--classifier", choices=["mlp", "linear", "weighted"], default="mlp")
+    p.add_argument("--hidden-dim", type=int, default=512, help="classifier MLP hidden size")
+    p.add_argument("--embed-dim", type=int, default=16, help="channel-attention Q/K/V dim (MSAM)")
+    p.add_argument("--kernel-size", type=int, default=3, help="MS-Conv kernel size (MSAM)")
+    p.add_argument("--dilations", type=int, nargs="+", default=[1, 2, 4, 8], help="MS-Conv dilation rates (MSAM)")
     p.add_argument("--layers", type=int, nargs="*", default=None, help="MusicFM hidden states (default: all 13)")
     p.add_argument("--no-dbn", action="store_true", help="peak picking instead of the DBN")
     p.add_argument("--chunk-sec", type=float, default=0.0, help="test-time window; 0 = whole piece")
@@ -171,8 +183,12 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out-dir", default="runs")
     p.add_argument("--save-all", action="store_true", help="keep a checkpoint for every epoch (default: best only)")
+    p.add_argument("--no-progress-bar", action="store_true", help="suppress batch progress output")
+    p.add_argument("--resume-ckpt", default=None, help="resume Lightning training state from a checkpoint")
     p.add_argument("--limit-tracks", type=int, default=0, help="debug: keep only N tracks per split")
     args = p.parse_args()
+    if args.student_adapter is not None and (args.input != "spect" or args.spect_fps != 50):
+        p.error("--student-adapter requires --input spect --spect-fps 50")
 
     seed_everything(args.seed, workers=True)
     rows = read_manifest(args.manifest)
@@ -193,8 +209,13 @@ def main():
                          collate_fn=first, num_workers=args.num_workers)
 
     model = PLBeatFM(lr=args.lr, layers=args.layers, classifier=args.classifier,
-                     dbn=not args.no_dbn, chunk_sec=args.chunk_sec, input_type=args.input)
+                     hidden_dim=args.hidden_dim, embed_dim=args.embed_dim,
+                     kernel_size=args.kernel_size, dilations=tuple(args.dilations),
+                     dbn=not args.no_dbn, chunk_sec=args.chunk_sec, input_type=args.input,
+                     spect_fps=args.spect_fps, student_adapter=args.student_adapter)
     run_dir = Path(args.out_dir) / f"fold{args.fold}"
+    if args.input == "spect" and args.spect_fps == 50:
+        run_dir /= "spect50_student" if args.student_adapter else "spect50"
     ckpt = ModelCheckpoint(dirpath=run_dir / "checkpoints", monitor="val_loss", mode="min",
                            save_top_k=-1 if args.save_all else 1)
     cuda = torch.cuda.is_available()
@@ -203,10 +224,11 @@ def main():
         accelerator="gpu" if cuda else "cpu",
         devices=[args.gpu] if cuda else 1,
         precision=args.precision,
+        enable_progress_bar=not args.no_progress_bar,
         callbacks=[EarlyStopping(monitor="val_loss", mode="min", patience=args.patience), ckpt],
         logger=CSVLogger(run_dir, name="logs"),
     )
-    trainer.fit(model, train_dl, val_dl)
+    trainer.fit(model, train_dl, val_dl, ckpt_path=args.resume_ckpt)
     trainer.test(model, test_dl, ckpt_path="best")
 
 

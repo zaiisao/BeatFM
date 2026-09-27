@@ -1,0 +1,224 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "BeatFM: train (wav, 1 epoch)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${command:python.interpreterPath}",
+      "program": "${workspaceFolder}/train.py",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false,
+      "args": [
+        "--manifest",
+        "${input:beatfmManifest}",
+        "--cache-dir",
+        "${input:beatfmCacheDir}",
+        "--input",
+        "wav",
+        "--fold",
+        "0",
+        "--batch-size",
+        "2",
+        "--max-epochs",
+        "1",
+        "--limit-tracks",
+        "2",
+        "--num-workers",
+        "0",
+        "--gpu",
+        "${input:beatfmGpu}"
+      ],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "BeatFM: train (spect, 1 epoch)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${command:python.interpreterPath}",
+      "program": "${workspaceFolder}/train.py",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false,
+      "args": [
+        "--manifest",
+        "${input:beatfmSpectManifest}",
+        "--input",
+        "spect",
+        "--fold",
+        "0",
+        "--batch-size",
+        "2",
+        "--max-epochs",
+        "1",
+        "--limit-tracks",
+        "2",
+        "--num-workers",
+        "0",
+        "--gpu",
+        "${input:beatfmGpu}"
+      ],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "BeatFM: train (spect 50 fps, 1 epoch)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${command:python.interpreterPath}",
+      "program": "${workspaceFolder}/train.py",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false,
+      "args": [
+        "--manifest",
+        "${input:beatfmSpectManifest}",
+        "--input",
+        "spect",
+        "--spect-fps",
+        "50",
+        "--fold",
+        "0",
+        "--batch-size",
+        "2",
+        "--max-epochs",
+        "1",
+        "--limit-tracks",
+        "2",
+        "--num-workers",
+        "0",
+        "--gpu",
+        "${input:beatfmGpu}"
+      ],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "BeatFM: dataset and label checks (spect)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${command:python.interpreterPath}",
+      "program": "${workspaceFolder}/scripts/check_data_spect.py",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "BeatFM: spectrogram model forward checks",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${command:python.interpreterPath}",
+      "program": "${workspaceFolder}/scripts/check_model_spect.py",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "BeatFM: spectrogram forward (50 fps input)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${command:python.interpreterPath}",
+      "program": "${workspaceFolder}/scripts/check_model_spect.py",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false,
+      "args": ["--spect-fps", "50"],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "BeatFM: evaluate checkpoint on one validation track",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${command:python.interpreterPath}",
+      "program": "${workspaceFolder}/scripts/eval_ckpt.py",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false,
+      "args": [
+        "--ckpt",
+        "${input:beatfmCheckpoint}",
+        "--manifest",
+        "${input:beatfmSpectManifest}",
+        "--split",
+        "val",
+        "--datasets",
+        "${input:beatfmDataset}",
+        "--limit-tracks",
+        "1",
+        "--num-workers",
+        "0",
+        "--gpu",
+        "${input:beatfmGpu}"
+      ],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "BeatFM: evaluate checkpoint (50 fps input)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${command:python.interpreterPath}",
+      "program": "${workspaceFolder}/scripts/eval_ckpt.py",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false,
+      "args": [
+        "--ckpt", "${input:beatfmCheckpoint}",
+        "--manifest", "${input:beatfmSpectManifest}",
+        "--split", "val",
+        "--datasets", "${input:beatfmDataset}",
+        "--limit-tracks", "1",
+        "--spect-fps", "50",
+        "--num-workers", "0",
+        "--gpu", "${input:beatfmGpu}"
+      ],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "beatfmManifest",
+      "type": "promptString",
+      "description": "Manifest CSV for wav inputs",
+      "default": "manifest.csv"
+    },
+    {
+      "id": "beatfmSpectManifest",
+      "type": "promptString",
+      "description": "Manifest CSV for Beat This spectrogram inputs",
+      "default": "manifest_spect.csv"
+    },
+    {
+      "id": "beatfmCacheDir",
+      "type": "promptString",
+      "description": "Existing 24 kHz wav cache directory",
+      "default": "cache"
+    },
+    {
+      "id": "beatfmCheckpoint",
+      "type": "promptString",
+      "description": "Lightning checkpoint path",
+      "default": "runs_B/fold0/checkpoints/epoch=2-step=4995.ckpt"
+    },
+    {
+      "id": "beatfmDataset",
+      "type": "promptString",
+      "description": "Dataset name to evaluate",
+      "default": "ballroom"
+    },
+    {
+      "id": "beatfmGpu",
+      "type": "promptString",
+      "description": "CUDA device index",
+      "default": "0"
+    }
+  ]
+}

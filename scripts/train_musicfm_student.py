@@ -14,7 +14,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 import torchaudio
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "third_party"))
@@ -23,10 +23,13 @@ from musicfm.modules.features import MelSTFT
 
 
 class FMAClips(Dataset):
-    def __init__(self, paths, seconds, random_crop):
+    def __init__(self, paths, seconds, random_crop, oversample_set=None):
         self.paths = paths
         self.seconds = seconds
         self.random_crop = random_crop
+        # if given, __getitem__ also returns whether the drawn path is in this set,
+        # so the training loop can apply an auxiliary loss just to those samples.
+        self.oversample_set = oversample_set
 
     def __len__(self):
         return len(self.paths)
@@ -51,7 +54,9 @@ class FMAClips(Dataset):
                     wav = torchaudio.functional.resample(wav, sr, 24000)
                 target = self.seconds * 24000
                 clip = F.pad(wav[:target], (0, max(0, target - wav.numel())))
-                return clip
+                if self.oversample_set is None:
+                    return clip
+                return clip, path in self.oversample_set
             except (OSError, RuntimeError) as exc:
                 print(f"Skipping unreadable FMA file {path}: {exc}", file=sys.stderr)
         raise RuntimeError(f"Could not decode eight tracks near {self.paths[index]}")
@@ -135,6 +140,7 @@ def validate(teacher, student, student_mel, loader, layers, device):
 def save_adapter(path, student, optimizer, args, step, val_loss, best_loss):
     state = {
         "format_version": 1,
+        "objective": getattr(args, "objective", "distillation"),
         "student_mel_hop": 480,
         "student_time_strides": tuple(args.time_strides),
         "step": step,
@@ -194,6 +200,17 @@ def main():
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--oversample-csv", type=Path, default=None,
+                        help="CSV with an 'fma_path' column listing tracks to oversample "
+                             "(see scripts/find_similar_fma.py). Requires --oversample-weight.")
+    parser.add_argument("--oversample-weight", type=float, default=10.0,
+                        help="relative sampling weight for tracks in --oversample-csv "
+                             "vs. weight 1.0 for the rest of the training set")
+    parser.add_argument("--aux-masked-token-weight", type=float, default=0.0,
+                        help="if > 0 and --oversample-csv is set: also add MusicFM's own "
+                             "masked-token loss (see train_musicfm_50_selfsup.py), applied "
+                             "only to oversampled-set tracks in each batch, weighted by this "
+                             "value and added to the distillation loss")
     args = parser.parse_args()
     if args.clip_seconds <= 0 or args.batch_size <= 0 or args.max_steps <= 0 or args.grad_clip <= 0:
         parser.error("clip-seconds, batch-size, max-steps and grad-clip must be positive")
@@ -208,8 +225,25 @@ def main():
     train_paths, val_paths = split_audio(args.audio_dir, args.val_percent, args.val_tracks)
     print(f"FMA: {len(train_paths)} training tracks, {len(val_paths)} validation tracks")
 
-    train_loader = DataLoader(FMAClips(train_paths, args.clip_seconds, True),
-                              batch_size=args.batch_size, shuffle=True,
+    sampler, shuffle, oversample_set = None, True, None
+    if args.oversample_csv is not None:
+        import csv as _csv
+        with open(args.oversample_csv) as f:
+            oversample_set = {Path(row["fma_path"]) for row in _csv.DictReader(f)}
+        weights = [args.oversample_weight if p in oversample_set else 1.0 for p in train_paths]
+        hit = sum(w > 1.0 for w in weights)
+        print(f"Oversampling: {hit}/{len(train_paths)} training tracks matched "
+              f"--oversample-csv (weight={args.oversample_weight})")
+        if hit == 0:
+            parser.error("--oversample-csv matched zero training tracks -- check paths line up "
+                         "with --audio-dir")
+        sampler, shuffle = WeightedRandomSampler(weights, num_samples=len(train_paths),
+                                                 replacement=True), False
+    elif args.aux_masked_token_weight > 0:
+        parser.error("--aux-masked-token-weight requires --oversample-csv")
+
+    train_loader = DataLoader(FMAClips(train_paths, args.clip_seconds, True, oversample_set),
+                              batch_size=args.batch_size, shuffle=shuffle, sampler=sampler,
                               num_workers=args.num_workers, pin_memory=args.device.startswith("cuda"))
     val_loader = DataLoader(FMAClips(val_paths, args.clip_seconds, False),
                             batch_size=args.batch_size, num_workers=args.num_workers,
@@ -247,17 +281,31 @@ def main():
         best = baseline
         save_adapter(args.out_dir / "best.pt", student, optimizer, args, step, baseline, best)
         save_adapter(args.out_dir / "last.pt", student, optimizer, args, step, baseline, best)
+    aux_loss_fn = None
+    if args.aux_masked_token_weight > 0:
+        from train_musicfm_50_selfsup import masked_token_loss as aux_loss_fn  # deferred: avoids circular import
+
     while step < args.max_steps:
         for batch in train_loader:
+            is_oversampled = None
+            if oversample_set is not None:
+                wav, is_oversampled = batch
+            else:
+                wav = batch
             student.train()
             student.conformer.eval()  # deterministic frozen layers and targets
-            wav = batch
             wav = wav.to(args.device, non_blocking=True)
             a, b = pair_mels(wav, teacher, student_mel)
             with torch.no_grad():
                 target = hidden_states(teacher, a)
             prediction = hidden_states(student, b)
             loss = distill_loss(prediction, target, args.layers)
+            aux_val = None
+            if aux_loss_fn is not None and is_oversampled.any():
+                aux_wav = wav[is_oversampled.to(args.device)]
+                aux_loss, aux_acc = aux_loss_fn(student, aux_wav, student_mel)
+                aux_val = aux_loss.item()
+                loss = loss + args.aux_masked_token_weight * aux_loss
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_((p for p in student.parameters() if p.requires_grad),
@@ -265,7 +313,8 @@ def main():
             optimizer.step()
             step += 1
             if step == 1 or step % 10 == 0:
-                print(f"step {step} training loss {loss.item():.5f}", flush=True)
+                extra = f" aux_masked_token_loss {aux_val:.5f}" if aux_val is not None else ""
+                print(f"step {step} training loss {loss.item():.5f}{extra}", flush=True)
             if step % args.val_every == 0 or step == args.max_steps:
                 score = validate(teacher, student, student_mel, val_loader,
                                  args.layers, args.device)

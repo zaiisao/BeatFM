@@ -12,7 +12,7 @@ from pathlib import Path
 
 ANN_ROOT = Path("/disk1/jaehoon/dataset_store/beat_this_annotations")
 LABELED = Path("/home/taegum/mnt/labeled_data")
-SPECT_ROOT = Path("/disk1/taegum/mnt/AlignBeat/data/audio/spectrograms")
+SPECT_ROOT = Path("/disk4/shared/beat_this/data/audio/spectrograms")
 
 
 AUDIO = {

@@ -143,6 +143,156 @@ upsample_time    50 → 100 fps 선형 보간
 - 시간 정렬: 오디오 입력과 spect 입력의 feature를 ±3 frame 밀어 비교했을 때 lag 0에서 최대(대칭). frame 수도 일치(30 s → 750).
 - 앞뒤 ±2 frame을 보는 선형 매핑을 데이터로 학습하면 cosine 0.93–0.96까지 올라갑니다(GTZAN 10곡 학습, 10곡 평가). 아직 적용하지 않았습니다.
 
+### Experimental 50 fps MusicFM input
+
+`--spect-fps 50` skips temporal interpolation of Beat This frames. The second
+MusicFM convolution stage keeps its original time stride of 2. The unchanged
+encoder therefore produces 12.5 fps features from 50 fps input; those features
+are interpolated to 25 fps before MSAM and the classifier. The default
+`--spect-fps 100` retains the original input interpolation path.
+
+Run `python scripts/check_model_spect.py --spect-fps 50` or use the VS Code
+"BeatFM: spectrogram forward (50 fps input)" configuration. A saved
+spectrogram checkpoint can be evaluated with
+`python scripts/eval_ckpt.py --ckpt PATH --manifest manifest_spect.csv --split val --spect-fps 50`
+to compare the same learned weights without retraining.
+
+Beat tracking was also evaluated with the same trained 100 fps checkpoint
+(`runs_B/fold0/checkpoints/epoch=2-step=4995.ckpt`) on its original 217-track
+validation split. The checkpoint and manifest are stored under
+`/disk1/taegum/mnt/musicfm_bridge/`. Scores below are track-weighted means;
+downbeat metrics exclude the 29 SMC tracks without downbeat labels.
+
+| Inference input | Beat F | Beat CMLt | Downbeat F | Downbeat CMLt |
+|---|---:|---:|---:|---:|
+| Interpolated 100 fps (trained setting) | 88.1 | 81.6 | 86.3 | 80.4 |
+| Direct 50 fps, interpolated encoder features (same weights) | 60.3 | 35.0 | 51.2 | 34.9 |
+
+This measures an inference-time input-rate change with the original MusicFM
+network. A model trained from the start with 50 fps input could perform
+differently.
+
+### Experimental 50 fps MusicFM student
+
+`scripts/train_musicfm_student.py` trains a student from the released MusicFM-MSD
+checkpoint using paired crops of FMA audio. The frozen teacher receives its
+original 100 fps mel. The student receives a separately computed 50 fps mel;
+the default frontend time strides are `(1, 2)`, so both networks emit 25 fps
+hidden states. The initial training scope is the student frontend only, and the loss
+matches hidden layers 0, 6, and 12. This is representation distillation, not
+BeatFM training or the original BEST-RQ pretraining objective.
+
+The downloaded `fma_large.zip` contains 30-second excerpts. It is smaller in
+audio duration than the full-length FMA collection used in the MusicFM paper.
+After extraction, a first run is:
+
+```bash
+conda activate musicfm
+python scripts/train_musicfm_student.py \
+  --audio-dir /disk1/jaehoon/dataset_store/fma/fma_large \
+  --out-dir runs/musicfm_student_50_first \
+  --max-steps 1000
+```
+
+The script reserves a deterministic track-level validation subset and writes
+`best.pt` and `last.pt` containing the adapted frontend, any selected final
+Conformer layers, and optimizer state. Pass `--resume runs/musicfm_student_50_first/last.pt`
+to continue an interrupted run; the data shuffle starts a new order on resume.
+It skips the tiny, undecodable MP3 placeholders present in FMA-large.
+`load_adapter(student, path)` in the script
+restores both the learned weights and the required 50 fps frontend stride.
+It does not alter the original
+MusicFM-MSD checkpoint. This first version does not use LoRA. Agreement on FMA
+must still be checked on other music, and the Beat This spectrogram conversion
+remains a separate input-domain mismatch.
+
+Two FMA-large runs used 1,000 steps, 6-second crops, batch size 2, and the
+same 64 held-out FMA tracks. Changing the first stride preserves the original
+frontend's intermediate 50 fps rate; changing the second gives an intermediate
+25 fps rate.
+
+| Student time strides | Validation loss before training | Best validation loss | Best step | Checkpoints |
+|---|---:|---:|---:|---|
+| `(2, 1)` | 0.2948 | 0.0320 | 900 | `runs/musicfm_student_50/` |
+| `(1, 2)` | 0.1272 | 0.0257 | 600 | `runs/musicfm_student_50_first/` |
+
+These losses measure teacher–student representation agreement on FMA, not beat
+tracking or generalization to Beat This.
+
+### Direct fine-tuning versus teacher–student adaptation
+
+`scripts/train_musicfm_50_selfsup.py` provides a direct fine-tuning baseline.
+It starts from the same MusicFM-MSD checkpoint, changes the frontend time
+strides to `(1, 2)`, and trains the same 26.2 million frontend parameters as
+the distilled student. It uses 50 fps masked mel input and the original
+MusicFM masked-token loss. Token targets come from the pretrained quantizer
+applied to unmasked 100 fps mel, so both paths have 25 token positions per
+second. This retains the original token vocabulary while changing the audio
+input rate. Both runs used 1,000 steps, batch size 2, six-second FMA crops,
+the same 64 held-out FMA tracks, and learning rate 1e-4.
+
+```bash
+python scripts/train_musicfm_50_selfsup.py --device cuda
+python scripts/compare_musicfm_50.py --source fma --device cuda
+python scripts/compare_musicfm_50.py --source gtzan --device cuda
+```
+
+| Evaluation data | 50 fps frontend | Masked-token loss ↓ | Token accuracy ↑ | Teacher layer-12 cosine ↑ |
+|---|---|---:|---:|---:|
+| FMA, 64 held-out tracks | Unadapted | 3.1414 | 0.3001 | 0.9313 |
+| FMA, 64 held-out tracks | Distilled | 3.1615 | 0.3061 | 0.9858 |
+| FMA, 64 held-out tracks | Direct fine-tuning | **2.7173** | **0.3594** | 0.8751 |
+| GTZAN, 100 tracks | Unadapted | 3.1038 | 0.3127 | 0.9438 |
+| GTZAN, 100 tracks | Distilled | 3.1898 | 0.2982 | **0.9892** |
+| GTZAN, 100 tracks | Direct fine-tuning | **2.8466** | **0.3310** | 0.8909 |
+
+Direct fine-tuning improves the task it trains on, while distillation better
+preserves the original teacher features. These metrics do not establish which
+features work better for downstream tasks. The GTZAN comparison uses separate
+audio from the FMA training run; one unreadable file was replaced by the
+dataset loader's fallback crop. Checkpoints are in
+`runs/musicfm_50_selfsup_first/` and `runs/musicfm_student_50_first/`.
+
+For a downstream check, `scripts/probe_musicfm_50_gtzan.py` extracts one
+centered six-second crop per GTZAN track, averages the final hidden layer over
+time, and fits the same standardized logistic regression for each frozen
+model. Each genre uses 80 hash-selected tracks for training and 20 for test;
+one unreadable training WAV is skipped (799 train, 200 test). No MusicFM
+weights are updated by this probe.
+
+| Frozen MusicFM features | Genre accuracy ↑ | Macro F1 ↑ |
+|---|---:|---:|
+| Original 100 fps teacher | 0.805 | 0.799 |
+| Unadapted 50 fps | 0.805 | 0.801 |
+| Distilled 50 fps | **0.815** | **0.813** |
+| Direct fine-tuned 50 fps | 0.795 | 0.790 |
+
+On this small probe, distillation has a modest advantage over direct
+fine-tuning (2 percentage points accuracy). This is one crop and one split,
+so it does not establish a general ranking or beat-tracking performance.
+
+#### Continued training to 3,000 steps
+
+Both runs were resumed from their 1,000-step `last.pt` checkpoints, including
+optimizer state, and trained for 2,000 more steps with the same settings.
+The data order restarts on resume. The original runs were preserved; extended
+checkpoints and logs are in `runs/musicfm_student_50_first_3000/` and
+`runs/musicfm_50_selfsup_first_3000/`. Each row below uses the checkpoint
+with the lowest validation loss for its own training objective.
+
+| Objective | Best step | Best FMA validation loss | GTZAN token accuracy | GTZAN teacher cosine, layer 12 | GTZAN genre accuracy |
+|---|---:|---:|---:|---:|---:|
+| Distillation, 1,000-step budget | 600 | 0.02570 | 0.2982 | 0.9892 | 0.815 |
+| Distillation, 3,000-step budget | 2900 | **0.02010** | 0.2971 | **0.9914** | 0.805 |
+| Direct masked-token, 1,000-step budget | 1000 | 2.71732 | 0.3310 | 0.8909 | 0.795 |
+| Direct masked-token, 3,000-step budget | 1900 | **2.71681** | **0.3325** | **0.8928** | 0.790 |
+
+Longer training improved each method's own validation objective slightly,
+especially teacher agreement for distillation. Genre accuracy did not improve
+for either method on this one split. The two validation losses use different
+objectives and cannot be compared numerically. At batch size 2, 3,000 steps
+sample only 6,000 crops from the 101,171-track FMA-large training pool.
+
 ---
 
 ## 논문 명시 사항 vs 직접 정한 값

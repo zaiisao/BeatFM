@@ -58,8 +58,12 @@ def power_to_musicfm(power, stats, db_offset=DB_OFFSET):
     db = 10.0 * torch.log10(power.clamp(min=1e-10)) + db_offset 
     return (db-stats["melspec_2048_mean"]) / stats["melspec_2048_std"]
 
-def bt_to_musicfm(spect, stats, width_bt, freq_map, db_offset=DB_OFFSET):
+def bt_to_musicfm(spect, stats, width_bt, freq_map, db_offset=DB_OFFSET, output_fps=100):
     mag = bt_to_mag(spect.transpose(1,2))
     power = mel_bt_to_fm(mag, width_bt, freq_map)
     mel = power_to_musicfm(power, stats, db_offset)
-    return upsample_time(mel)
+    if output_fps == 50:
+        return mel
+    if output_fps == 100:
+        return upsample_time(mel)
+    raise ValueError(f"unsupported MusicFM mel frame rate: {output_fps}")

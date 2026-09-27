@@ -12,9 +12,25 @@ DEFAULT_STAT_PATH = MUSICFM_DIR / "data" / "msd_stats.json"
 DEFAULT_MODEL_PATH = MUSICFM_DIR / "data" / "pretrained_msd.pt"
 
 class MusicFMExtractor(nn.Module):
-    def __init__(self, stat_path=DEFAULT_STAT_PATH, model_path=DEFAULT_MODEL_PATH, layers=None, freeze=True):
+    def __init__(self, stat_path=DEFAULT_STAT_PATH, model_path=DEFAULT_MODEL_PATH, layers=None,
+                 freeze=True, student_adapter=None):
         super().__init__()
         self.musicfm = MusicFM25Hz(is_flash=False, stat_path=stat_path, model_path=model_path)
+        if student_adapter is not None:
+            saved = torch.load(student_adapter, map_location="cpu", weights_only=False)
+            if (saved.get("format_version"), saved.get("student_mel_hop"),
+                    tuple(saved.get("student_time_strides", ()))) != (1, 480, (1, 2)):
+                raise ValueError("Expected a 50 fps student adapter with (1, 2) time strides")
+            for stage, time_stride in zip(self.musicfm.conv.conv, (1, 2)):
+                stage.conv1.stride = (2, time_stride)
+                stage.conv3.stride = (2, time_stride)
+            self.musicfm.conv.load_state_dict(saved["frontend"])
+            n = saved["config"]["train_last_n"]
+            if len(saved["last_layers"]) != n:
+                raise ValueError("Adapter Conformer layer count is inconsistent")
+            for layer, state in zip(self.musicfm.conformer.layers[-n:] if n else [],
+                                    saved["last_layers"]):
+                layer.load_state_dict(state)
         self.layers = list(layers) if layers is not None else list(range(13))
         self.freeze = freeze
         if freeze:
@@ -39,7 +55,7 @@ class MusicFMExtractor(nn.Module):
         return h.transpose(2, 3)
 
     def forward_mel(self, mel):
-        """mel: (B, 128, T_mel) normalized MusicFM input at 100 fps -> (B, N, F, T_mel / 4)"""
+        """Normalized mel (B, 128, T); returns one feature frame per four input frames."""
         with torch.set_grad_enabled(not self.freeze):
             _, hidden_emb = self.musicfm.encoder(mel)
         h = torch.stack([hidden_emb[i] for i in self.layers], dim=1)
