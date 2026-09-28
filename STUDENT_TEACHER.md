@@ -28,7 +28,7 @@ The data and model weights are not committed to this repository.
 ```bash
 python scripts/train_musicfm_student.py \
   --audio-dir /disk1/jaehoon/dataset_store/fma/fma_large \
-  --out-dir runs/musicfm_student_50_audit \
+  --out-dir runs/musicfm_student_50 \
   --max-steps 1000
 ```
 
