@@ -7,18 +7,62 @@ Mirrors beat_this/launch_scripts/train.py almost exactly; only the model
 construction (PLBeatFMThis instead of PLBeatThis) differs.
 """
 import argparse
+import csv
 import sys
+from collections import defaultdict
+from functools import partial
 from pathlib import Path
 
+import numpy as np
 import torch
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import CSVLogger
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 sys.path.insert(0, str(Path.home() / "jaehoon" / "beat_this"))
 from beat_this.dataset import BeatDataModule
 
 from beatfm_beatthis_bridge import PLBeatFMThis
+
+
+def hardness_weights(items, scores_csv, mix, max_weight):
+    """per-excerpt sampling weights from out-of-fold beat F of a reference model:
+    w = (1 - mix) + mix * d / mean(d),  d = 1 - F,  clipped to max_weight.
+    Only training items are looked up, so the held-out fold never affects the weights."""
+    with open(scores_csv) as f:
+        f1 = {r["item"]: float(r["beat_f_measure"]) for r in csv.DictReader(f)}
+    names = [str(item["spect_path"].parent) for item in items]
+    d = np.array([1.0 - f1.get(n, np.nan) for n in names])
+    n_missing = int(np.isnan(d).sum())
+    d[np.isnan(d)] = np.nanmean(d)                       # unscored -> average difficulty
+    w = np.minimum((1 - mix) + mix * d / d.mean(), max_weight)
+    print(f"hard sampling: {len(w)} excerpts, {n_missing} without a score, weight range "
+          f"{w.min():.2f}-{w.max():.2f}")
+    share = defaultdict(lambda: [0.0, 0.0])
+    for n, wi in zip(names, w):
+        share[n.split("/")[0]][0] += 1
+        share[n.split("/")[0]][1] += wi
+    for ds, (cnt, tot) in sorted(share.items()):
+        print(f"  {ds:16s} share {100 * cnt / len(w):5.1f}% -> {100 * tot / w.sum():5.1f}%")
+    return torch.as_tensor(w, dtype=torch.double)
+
+
+class HardSamplingDataModule(BeatDataModule):
+    """BeatDataModule whose training loader draws excerpts in proportion to given weights"""
+
+    def __init__(self, *args, sample_weights_fn=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sample_weights_fn = sample_weights_fn
+        self.sample_weights = None
+
+    def train_dataloader(self):
+        if self.sample_weights is None:
+            self.sample_weights = self.sample_weights_fn(self.train_dataset.items)
+        sampler = WeightedRandomSampler(self.sample_weights, num_samples=len(self.sample_weights),
+                                        replacement=True)
+        return DataLoader(self.train_dataset, num_workers=self.num_workers, batch_size=self.batch_size,
+                          sampler=sampler, drop_last=True, pin_memory=True)
 
 
 def main(args):
@@ -39,7 +83,12 @@ def main(args):
             "min_len": 0.1, "max_len": 2, "min_parts": 5, "max_parts": 9,
         }
 
-    datamodule = BeatDataModule(
+    if args.hard_scores:
+        weights_fn = lambda items: hardness_weights(items, args.hard_scores, args.hard_mix, args.hard_max_weight)
+        datamodule_cls = partial(HardSamplingDataModule, sample_weights_fn=weights_fn)
+    else:
+        datamodule_cls = BeatDataModule
+    datamodule = datamodule_cls(
         data_dir, batch_size=args.batch_size, train_length=args.train_length,
         spect_fps=50, num_workers=args.num_workers, test_dataset="gtzan",
         augmentations=augmentations, fold=args.fold,
@@ -95,6 +144,10 @@ if __name__ == "__main__":
     p.add_argument("--no-pitch-augmentation", dest="pitch_augmentation", action="store_false")
     p.add_argument("--mask-augmentation", action="store_true", default=True)
     p.add_argument("--no-mask-augmentation", dest="mask_augmentation", action="store_false")
+    p.add_argument("--hard-scores", default=None,
+                   help="CSV (item, fold, beat_f_measure) of out-of-fold scores; enables hardness-biased sampling")
+    p.add_argument("--hard-mix", type=float, default=0.5, help="0 = uniform, 1 = proportional to 1 - F")
+    p.add_argument("--hard-max-weight", type=float, default=4.0)
     p.add_argument("--fold", type=int, default=0)
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--accumulate-grad-batches", type=int, default=8)
