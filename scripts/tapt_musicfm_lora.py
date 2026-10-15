@@ -11,6 +11,7 @@ MusicFM's quantized tokens of the clean mel. Only LoRA weights are trained.
 The adapter is loaded for beat training with train_beatfm_via_beatthis.py --lora-init.
 """
 import argparse
+import csv
 import math
 import sys
 from pathlib import Path
@@ -34,6 +35,25 @@ SPAN = 40                                   # 400 ms at 100 fps = 10 tokens
 
 
 @torch.no_grad()
+class SpectFiles(torch.utils.data.Dataset):
+    """Beat This spectrograms saved as .npy (scripts/select_fma_like_smc.py), random crops"""
+
+    def __init__(self, files, length, random_crop):
+        self.files, self.length, self.random_crop = files, length, random_crop
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, i):
+        s = np.load(self.files[i], mmap_mode="r")
+        if len(s) > self.length:
+            start = np.random.randint(0, len(s) - self.length + 1) if self.random_crop else 0
+            s = s[start:start + self.length]
+        out = np.zeros((self.length, s.shape[1]), np.float16)
+        out[:len(s)] = s
+        return {"spect": torch.from_numpy(out)}
+
+
 def subset(item):
     """dataset name of an item; RWC is split by collection (rwc/rwc_classical_CD... -> rwc_classical)"""
     dataset, stem = item.split("/", 1)
@@ -97,21 +117,29 @@ def main(args):
     torch.manual_seed(args.seed)
     device = torch.device(f"cuda:{args.gpu}")
 
-    dm = BeatDataModule(ROOT / "data_beatthis", batch_size=args.batch_size, fold=args.fold,
-                        spect_fps=50, test_dataset="gtzan", num_workers=args.num_workers)
-    dm.setup("fit")                                    # train_items exclude the held-out fold
-    items = [i for i in dm.train_items if subset(i) in args.datasets]
     rng = np.random.default_rng(args.seed)
-    items = list(rng.permutation(items))
-    n_val = max(16, len(items) // 20)                  # monitoring split, taken from training folds
-    val_items, train_items = items[:n_val], items[n_val:]
-    print(f"fold {args.fold}: {len(train_items)} train / {len(val_items)} monitor tracks from {args.datasets}")
-
-    aug = {} if args.no_augmentation else {"tempo": {"min": -20, "max": 20, "stride": 4},
-                                            "pitch": {"min": -5, "max": 6}}
-    common = dict(data_folder=ROOT / "data_beatthis", spect_fps=50, train_length=args.train_length)
-    train_ds = BeatTrackingDataset(train_items, deterministic=False, augmentations=aug, **common)
-    val_ds = BeatTrackingDataset(val_items, deterministic=True, augmentations={}, **common)
+    if args.spect_csv:                                 # unlabeled audio selected elsewhere (e.g. FMA)
+        with open(args.spect_csv) as fh:
+            files = [r["spect"] for r in csv.DictReader(fh)]
+        files = list(rng.permutation(files))
+        n_val = max(16, len(files) // 20)
+        train_ds = SpectFiles(files[n_val:], args.train_length, random_crop=True)
+        val_ds = SpectFiles(files[:n_val], args.train_length, random_crop=False)
+        print(f"{len(train_ds)} train / {len(val_ds)} monitor clips from {args.spect_csv}")
+    else:
+        dm = BeatDataModule(ROOT / "data_beatthis", batch_size=args.batch_size, fold=args.fold,
+                            spect_fps=50, test_dataset="gtzan", num_workers=args.num_workers)
+        dm.setup("fit")                                # train_items exclude the held-out fold
+        items = [i for i in dm.train_items if subset(i) in args.datasets]
+        items = list(rng.permutation(items))
+        n_val = max(16, len(items) // 20)              # monitoring split, taken from training folds
+        val_items, train_items = items[:n_val], items[n_val:]
+        print(f"fold {args.fold}: {len(train_items)} train / {len(val_items)} monitor tracks from {args.datasets}")
+        aug = {} if args.no_augmentation else {"tempo": {"min": -20, "max": 20, "stride": 4},
+                                                "pitch": {"min": -5, "max": 6}}
+        common = dict(data_folder=ROOT / "data_beatthis", spect_fps=50, train_length=args.train_length)
+        train_ds = BeatTrackingDataset(train_items, deterministic=False, augmentations=aug, **common)
+        val_ds = BeatTrackingDataset(val_items, deterministic=True, augmentations={}, **common)
     train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True,
                           num_workers=args.num_workers, pin_memory=True)
     val_dl = DataLoader(val_ds, batch_size=args.batch_size, num_workers=args.num_workers)
@@ -160,7 +188,7 @@ def main(args):
             if vl < best:
                 best = vl
                 torch.save({"rank": args.lora_rank, "alpha": args.lora_alpha or args.lora_rank,
-                            "fold": args.fold, "datasets": list(args.datasets), "step": step,
+                            "fold": args.fold, "datasets": [args.spect_csv] if args.spect_csv else list(args.datasets), "step": step,
                             "monitor_loss": vl, "monitor_acc": va,
                             "lora": {k: v.detach().cpu() for k, v in musicfm.state_dict().items()
                                      if is_lora_key(k)}}, out)
@@ -171,6 +199,8 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--fold", type=int, default=0)
     p.add_argument("--datasets", nargs="+", default=list(HARD))
+    p.add_argument("--spect-csv", default=None,
+                   help="train on these spectrograms instead (selected.csv from select_fma_like_smc.py)")
     p.add_argument("--lora-rank", type=int, default=8)
     p.add_argument("--lora-alpha", type=float, default=None)
     p.add_argument("--steps", type=int, default=4000)
