@@ -20,14 +20,41 @@ from beat_this.dataset import BeatDataModule
 
 from beatfm_beatthis_bridge import PLBeatFMThis
 
+class CASMPost:
+    """Beat This postprocessor interface around CASM's frozen 7F decoder (He et al., 2026)"""
+
+    def __init__(self):
+        from casm_beat_tracking import CASMProcessor
+        self.casm = CASMProcessor(input_type="logits")       # 50 fps, 30-300 BPM
+
+    def __call__(self, beat, downbeat, padding_mask=None):
+        beats, downbeats = [], []
+        for b, d in zip(beat.double().cpu().numpy(), downbeat.double().cpu().numpy()):
+            ev = self.casm(np.stack([b, d], axis=1))
+            beats.append(ev[:, 0])
+            downbeats.append(ev[ev[:, 1] == 1, 0])
+        return tuple(beats), tuple(downbeats)                 # Beat This metrics expect tuples
+
+
+def wide_dbn(fps=50):
+    """madmom DBN with the 30-300 BPM range used by CASM's paper (Beat This defaults to 55-215)"""
+    from madmom.features.downbeats import DBNDownBeatTrackingProcessor
+    return DBNDownBeatTrackingProcessor(beats_per_bar=[3, 4], min_bpm=30.0, max_bpm=300.0,
+                                        fps=fps, transition_lambda=100)
+
+
 KEYS = ("F-measure_beat", "CMLt_beat", "AMLt_beat", "F-measure_downbeat", "CMLt_downbeat", "AMLt_downbeat")
 
 
 def main(args):
     ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     hp = dict(ckpt["hyper_parameters"])
-    hp["use_dbn"] = args.dbn
+    hp["use_dbn"] = args.post in ("dbn", "dbn_wide")
     model = PLBeatFMThis(**hp)
+    if args.post == "dbn_wide":
+        model.postprocessor.dbn = wide_dbn()
+    elif args.post == "casm":
+        model.postprocessor = CASMPost()
     model.on_load_checkpoint(ckpt)                    # restore the frozen MusicFM weights
     model.load_state_dict(ckpt["state_dict"])
 
@@ -42,7 +69,7 @@ def main(args):
     metrics = {k: np.asarray([o[0][k] for o in out]) for k in out[0][0]}
     dataset = np.asarray([o[2][0] for o in out])
 
-    print(f"\n{args.ckpt}  fold {fold}  split {args.datasplit}  dbn {args.dbn}")
+    print(f"\n{args.ckpt}  fold {fold}  split {args.datasplit}  post {args.post}")
     print(f"{'dataset':14s} {'n':>4s} " + " ".join(f"{k:>19s}" for k in KEYS))
     table = {}
     for d in np.unique(dataset):
@@ -59,7 +86,8 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("ckpt")
     p.add_argument("--datasplit", choices=("val", "test"), default="val")
-    p.add_argument("--dbn", action="store_true")
+    p.add_argument("--post", choices=("minimal", "dbn", "dbn_wide", "casm"), default="minimal",
+                   help="minimal: Beat This peak picking; dbn: madmom DBN 55-215 BPM; dbn_wide: 30-300 BPM; casm")
     p.add_argument("--gpu", type=int, default=0)
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--out", default=None, help="write per-dataset metrics as JSON")
