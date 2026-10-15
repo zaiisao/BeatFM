@@ -15,9 +15,11 @@ class BeatFM(nn.Module):
     """
 
     def __init__(self, layers=None, feat_dim=1024, hidden_dim=512, classifier="mlp",
-                 dilations=(1, 2, 4, 8), kernel_size=3, embed_dim=16, input_type="wav"):
+                 dilations=(1, 2, 4, 8), kernel_size=3, embed_dim=16, input_type="wav",
+                 sum_head=False, lora_rank=0, lora_alpha=None):
         super().__init__()
-        self.extractor = MusicFMExtractor(layers=layers)
+        self.extractor = MusicFMExtractor(layers=layers, lora_rank=lora_rank, lora_alpha=lora_alpha)
+        self.sum_head = sum_head          # Beat This SumHead: downbeat logit added into beat logit
         self.input_type = input_type
         if input_type == "spect":
             width_bt, freq_map = build_freq_map()                 # fixed; rebuilt on load, not saved
@@ -66,5 +68,8 @@ class BeatFM(nn.Module):
         else:
             h = rearrange(h, "b n f t -> b t (n f)")          # (B, T, N*F)
         logits = self.classifier(h)                           # (B, T, 2)
-        return logits[..., 0], logits[..., 1]                 # beat, downbeat
+        beat, downbeat = logits[..., 0], logits[..., 1]
+        if self.sum_head:
+            beat = beat + downbeat
+        return beat, downbeat
 

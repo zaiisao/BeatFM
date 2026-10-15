@@ -1,0 +1,88 @@
+"""
+Run BeatFM's model (MusicFM + MSAM + classifier) inside Beat This's own
+PyTorch Lightning training harness: their dataset (augmentation), their loss
+(ShiftTolerantBCELoss), their optimizer/scheduler (AdamW + weight decay + cosine warmup).
+
+Input path: Beat This 50 fps spectrogram -> MusicFM mel -> upsampled to 100 fps -> stock MusicFM.
+MusicFM is frozen; with lora_rank > 0 LoRA updates on its attention projections are trained.
+"""
+import sys
+from pathlib import Path
+
+import torch
+import torch.nn.functional as F
+from torch import nn
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path.home() / "jaehoon" / "beat_this"))
+
+from lora import is_lora_key
+from model import BeatFM                          # this repo
+from beat_this.model.pl_module import PLBeatThis, CosineWarmupScheduler   # Beat This repo
+
+EXTRACTOR = "model.beatfm.extractor."
+
+
+class BeatFMAdapter(nn.Module):
+    """BeatFM with Beat This's interface: (B, T, 128) spect at 50 fps in,
+    {"beat": (B, T), "downbeat": (B, T)} logits at 50 fps out"""
+
+    def __init__(self, layers=None, hidden_dim=512, classifier="mlp", embed_dim=16,
+                 kernel_size=3, dilations=(1, 2, 4, 8), sum_head=True, lora_rank=0, lora_alpha=None):
+        super().__init__()
+        self.beatfm = BeatFM(layers=layers, hidden_dim=hidden_dim, classifier=classifier,
+                             embed_dim=embed_dim, kernel_size=kernel_size, dilations=dilations,
+                             input_type="spect", sum_head=sum_head,
+                             lora_rank=lora_rank, lora_alpha=lora_alpha)
+
+    def forward(self, spect):
+        beat, downbeat = self.beatfm(spect)          # 25 fps
+        t = spect.shape[1]                           # back to Beat This's 50 fps targets
+        beat = F.interpolate(beat[:, None], size=t, mode="linear", align_corners=True)[:, 0]
+        downbeat = F.interpolate(downbeat[:, None], size=t, mode="linear", align_corners=True)[:, 0]
+        return {"beat": beat, "downbeat": downbeat}
+
+
+class PLBeatFMThis(PLBeatThis):
+    """PLBeatThis with self.model = BeatFMAdapter"""
+
+    def __init__(self, layers=None, hidden_dim=512, classifier="mlp", embed_dim=16, kernel_size=3,
+                 dilations=(1, 2, 4, 8), sum_head=True, lora_rank=0, lora_alpha=None, lora_lr=None,
+                 **beatthis_kwargs):
+        # beatthis_kwargs: lr, weight_decay, pos_weights, loss_type, warmup_steps,
+        # max_epochs, use_dbn, eval_trim_beats
+        beatthis_kwargs.setdefault("fps", 50)
+        super().__init__(**beatthis_kwargs)
+        self.lora_lr = lora_lr if lora_lr is not None else self.lr
+        self.model = BeatFMAdapter(layers=layers, hidden_dim=hidden_dim, classifier=classifier,
+                                   embed_dim=embed_dim, kernel_size=kernel_size, dilations=dilations,
+                                   sum_head=sum_head, lora_rank=lora_rank, lora_alpha=lora_alpha)
+
+    def configure_optimizers(self):
+        # Beat This's groups (decay only >= 2-dim tensors) plus a separate group for LoRA
+        named = [(n, p) for n, p in self.named_parameters() if p.requires_grad]
+        lora = [p for n, p in named if is_lora_key(n)]
+        rest = [p for n, p in named if not is_lora_key(n)]
+        groups = [
+            {"params": [p for p in rest if p.ndim >= 2], "weight_decay": self.weight_decay},
+            {"params": [p for p in rest if p.ndim <= 1], "weight_decay": 0},
+        ]
+        if lora:
+            groups.append({"params": lora, "weight_decay": self.weight_decay, "lr": self.lora_lr})
+        optimizer = torch.optim.AdamW(groups, lr=self.lr)
+        self.lr_scheduler = CosineWarmupScheduler(optimizer, self.warmup_steps,
+                                                  self.trainer.estimated_stepping_batches)
+        return {"optimizer": optimizer, "lr_scheduler": {"scheduler": self.lr_scheduler, "interval": "step"}}
+
+    # frozen MusicFM is reloaded from its own checkpoint -> store only the trainable LoRA part of it
+    def on_save_checkpoint(self, ckpt):
+        ckpt["state_dict"] = {k: v for k, v in ckpt["state_dict"].items()
+                              if not k.startswith(EXTRACTOR) or is_lora_key(k)}
+
+    def on_load_checkpoint(self, ckpt):
+        own = self.state_dict()
+        missing = [k for k in own if k.startswith(EXTRACTOR) and is_lora_key(k) and k not in ckpt["state_dict"]]
+        if missing:
+            raise KeyError(f"checkpoint lacks {len(missing)} LoRA tensors, e.g. {missing[0]}")
+        ckpt["state_dict"].update({k: v for k, v in own.items()
+                                   if k.startswith(EXTRACTOR) and not is_lora_key(k)})
