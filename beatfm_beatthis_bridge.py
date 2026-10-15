@@ -36,11 +36,19 @@ class BeatFMAdapter(nn.Module):
                              lora_rank=lora_rank, lora_alpha=lora_alpha)
 
     def forward(self, spect):
-        beat, downbeat = self.beatfm(spect)          # 25 fps
-        t = spect.shape[1]                           # back to Beat This's 50 fps targets
-        beat = F.interpolate(beat[:, None], size=t, mode="linear", align_corners=True)[:, 0]
-        downbeat = F.interpolate(downbeat[:, None], size=t, mode="linear", align_corners=True)[:, 0]
-        return {"beat": beat, "downbeat": downbeat}
+        beat, downbeat = self.beatfm(spect)          # 25 fps: feature i at i / 25 s
+        t = spect.shape[1]
+        return {"beat": to_50fps(beat, t), "downbeat": to_50fps(downbeat, t)}
+
+
+def to_50fps(x, t):
+    """(B, n) at 25 fps -> (B, t) at 50 fps with feature i placed exactly on frame 2i
+    (linear in between); frames past the last feature repeat it"""
+    n = x.shape[1]
+    x = F.interpolate(x[:, None], size=2 * n - 1, mode="linear", align_corners=True)[:, 0]
+    if x.shape[1] < t:
+        x = torch.cat([x, x[:, -1:].expand(-1, t - x.shape[1])], dim=1)
+    return x[:, :t]
 
 
 class PLBeatFMThis(PLBeatThis):
