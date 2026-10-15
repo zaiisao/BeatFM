@@ -23,6 +23,18 @@ from beat_this.model.pl_module import PLBeatThis, CosineWarmupScheduler   # Beat
 EXTRACTOR = "model.beatfm.extractor."
 
 
+def load_lora_init(musicfm, path, rank, alpha):
+    """start the LoRA weights from a stage-1 adapter (scripts/tapt_musicfm_lora.py)"""
+    saved = torch.load(path, map_location="cpu", weights_only=False)
+    if (saved["rank"], saved["alpha"]) != (rank, alpha if alpha is not None else rank):
+        raise ValueError(f"adapter has rank/alpha {saved['rank']}/{saved['alpha']}, model {rank}/{alpha}")
+    own = {k for k in musicfm.state_dict() if is_lora_key(k)}
+    if set(saved["lora"]) != own:
+        raise KeyError(f"adapter keys do not match the model's {len(own)} LoRA tensors")
+    musicfm.load_state_dict(saved["lora"], strict=False)
+    print(f"LoRA initialized from {path} (stage-1 step {saved['step']}, fold {saved['fold']})")
+
+
 class BeatFMAdapter(nn.Module):
     """BeatFM with Beat This's interface: (B, T, 128) spect at 50 fps in,
     {"beat": (B, T), "downbeat": (B, T)} logits at 50 fps out"""
@@ -56,7 +68,7 @@ class PLBeatFMThis(PLBeatThis):
 
     def __init__(self, layers=None, hidden_dim=512, classifier="mlp", embed_dim=16, kernel_size=3,
                  dilations=(1, 2, 4, 8), sum_head=True, lora_rank=0, lora_alpha=None, lora_lr=None,
-                 **beatthis_kwargs):
+                 lora_init=None, **beatthis_kwargs):
         # beatthis_kwargs: lr, weight_decay, pos_weights, loss_type, warmup_steps,
         # max_epochs, use_dbn, eval_trim_beats
         beatthis_kwargs.setdefault("fps", 50)
@@ -65,6 +77,8 @@ class PLBeatFMThis(PLBeatThis):
         self.model = BeatFMAdapter(layers=layers, hidden_dim=hidden_dim, classifier=classifier,
                                    embed_dim=embed_dim, kernel_size=kernel_size, dilations=dilations,
                                    sum_head=sum_head, lora_rank=lora_rank, lora_alpha=lora_alpha)
+        if lora_init is not None:
+            load_lora_init(self.model.beatfm.extractor.musicfm, lora_init, lora_rank, lora_alpha)
 
     def configure_optimizers(self):
         # Beat This's groups (decay only >= 2-dim tensors) plus a separate group for LoRA

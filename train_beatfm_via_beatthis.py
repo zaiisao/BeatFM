@@ -100,7 +100,7 @@ def main(args):
     print("Using positive weights:", pos_weights)
 
     pl_model = PLBeatFMThis(
-        lora_rank=args.lora_rank, lora_alpha=args.lora_alpha, lora_lr=args.lora_lr,
+        lora_rank=args.lora_rank, lora_alpha=args.lora_alpha, lora_lr=args.lora_lr, lora_init=args.lora_init,
         classifier=args.classifier, hidden_dim=args.hidden_dim,
         embed_dim=args.embed_dim, kernel_size=args.kernel_size,
         sum_head=args.sum_head,
@@ -134,6 +134,7 @@ if __name__ == "__main__":
     p.add_argument("--lora-rank", type=int, default=0, help="0 = frozen MusicFM")
     p.add_argument("--lora-alpha", type=float, default=None, help="default: = rank (scale 1)")
     p.add_argument("--lora-lr", type=float, default=None, help="default: = --lr")
+    p.add_argument("--lora-init", default=None, help="stage-1 adapter from scripts/tapt_musicfm_lora.py")
     p.add_argument("--classifier", choices=["mlp", "linear", "weighted"], default="mlp")
     p.add_argument("--hidden-dim", type=int, default=512)
     p.add_argument("--embed-dim", type=int, default=16)
