@@ -51,14 +51,16 @@ def hardness_weights(items, scores_csv, mix, max_weight):
 class HardSamplingDataModule(BeatDataModule):
     """BeatDataModule whose training loader draws excerpts in proportion to given weights"""
 
-    def __init__(self, *args, sample_weights_fn=None, **kwargs):
+    # plain values only: Lightning pickles datamodule init args into every checkpoint
+    def __init__(self, *args, hard_scores=None, hard_mix=0.5, hard_max_weight=4.0, **kwargs):
         super().__init__(*args, **kwargs)
-        self.sample_weights_fn = sample_weights_fn
+        self.hard_scores, self.hard_mix, self.hard_max_weight = hard_scores, hard_mix, hard_max_weight
         self.sample_weights = None
 
     def train_dataloader(self):
         if self.sample_weights is None:
-            self.sample_weights = self.sample_weights_fn(self.train_dataset.items)
+            self.sample_weights = hardness_weights(self.train_dataset.items, self.hard_scores,
+                                                   self.hard_mix, self.hard_max_weight)
         sampler = WeightedRandomSampler(self.sample_weights, num_samples=len(self.sample_weights),
                                         replacement=True)
         return DataLoader(self.train_dataset, num_workers=self.num_workers, batch_size=self.batch_size,
@@ -84,8 +86,8 @@ def main(args):
         }
 
     if args.hard_scores:
-        weights_fn = lambda items: hardness_weights(items, args.hard_scores, args.hard_mix, args.hard_max_weight)
-        datamodule_cls = partial(HardSamplingDataModule, sample_weights_fn=weights_fn)
+        datamodule_cls = partial(HardSamplingDataModule, hard_scores=args.hard_scores,
+                                 hard_mix=args.hard_mix, hard_max_weight=args.hard_max_weight)
     else:
         datamodule_cls = BeatDataModule
     datamodule = datamodule_cls(
