@@ -16,7 +16,7 @@ class BeatFM(nn.Module):
 
     def __init__(self, layers=None, feat_dim=1024, hidden_dim=512, classifier="mlp",
                  dilations=(1, 2, 4, 8), kernel_size=3, embed_dim=16, input_type="wav",
-                 sum_head=False, lora_rank=0, lora_alpha=None):
+                 sum_head=False, lora_rank=0, lora_alpha=None, transformer_layers=4):
         super().__init__()
         self.extractor = MusicFMExtractor(layers=layers, lora_rank=lora_rank, lora_alpha=lora_alpha)
         self.sum_head = sum_head          # Beat This SumHead: downbeat logit added into beat logit
@@ -49,6 +49,20 @@ class BeatFM(nn.Module):
             )
         elif classifier == "linear":
             self.classifier = nn.Linear(in_dim, 2)
+        elif classifier == "transformer":
+            # temporal modelling after the backbone, with Beat This's own transformer blocks
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path.home() / "jaehoon" / "beat_this"))
+            from beat_this.model import roformer
+            from rotary_embedding_torch import RotaryEmbedding
+            self.classifier = nn.Sequential(
+                nn.Linear(in_dim, hidden_dim),
+                roformer.Transformer(dim=hidden_dim, depth=transformer_layers, heads=hidden_dim // 32,
+                                     dim_head=32, attn_dropout=0.2, ff_dropout=0.2, ff_mult=4,
+                                     rotary_embed=RotaryEmbedding(32), norm_output=True),
+                nn.Linear(hidden_dim, 2),
+            )
         else:
             raise ValueError(f"unknown classifier: {classifier}")
 

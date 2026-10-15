@@ -40,12 +40,14 @@ class BeatFMAdapter(nn.Module):
     {"beat": (B, T), "downbeat": (B, T)} logits at 50 fps out"""
 
     def __init__(self, layers=None, hidden_dim=512, classifier="mlp", embed_dim=16,
-                 kernel_size=3, dilations=(1, 2, 4, 8), sum_head=True, lora_rank=0, lora_alpha=None):
+                 kernel_size=3, dilations=(1, 2, 4, 8), sum_head=True, lora_rank=0, lora_alpha=None,
+                 transformer_layers=4):
         super().__init__()
         self.beatfm = BeatFM(layers=layers, hidden_dim=hidden_dim, classifier=classifier,
                              embed_dim=embed_dim, kernel_size=kernel_size, dilations=dilations,
                              input_type="spect", sum_head=sum_head,
-                             lora_rank=lora_rank, lora_alpha=lora_alpha)
+                             lora_rank=lora_rank, lora_alpha=lora_alpha,
+                             transformer_layers=transformer_layers)
 
     def forward(self, spect):
         beat, downbeat = self.beatfm(spect)          # 25 fps: feature i at i / 25 s
@@ -68,7 +70,7 @@ class PLBeatFMThis(PLBeatThis):
 
     def __init__(self, layers=None, hidden_dim=512, classifier="mlp", embed_dim=16, kernel_size=3,
                  dilations=(1, 2, 4, 8), sum_head=True, lora_rank=0, lora_alpha=None, lora_lr=None,
-                 lora_init=None, **beatthis_kwargs):
+                 lora_init=None, transformer_layers=4, **beatthis_kwargs):
         # beatthis_kwargs: lr, weight_decay, pos_weights, loss_type, warmup_steps,
         # max_epochs, use_dbn, eval_trim_beats
         beatthis_kwargs.setdefault("fps", 50)
@@ -76,7 +78,8 @@ class PLBeatFMThis(PLBeatThis):
         self.lora_lr = lora_lr if lora_lr is not None else self.lr
         self.model = BeatFMAdapter(layers=layers, hidden_dim=hidden_dim, classifier=classifier,
                                    embed_dim=embed_dim, kernel_size=kernel_size, dilations=dilations,
-                                   sum_head=sum_head, lora_rank=lora_rank, lora_alpha=lora_alpha)
+                                   sum_head=sum_head, lora_rank=lora_rank, lora_alpha=lora_alpha,
+                                   transformer_layers=transformer_layers)
         if lora_init is not None:
             load_lora_init(self.model.beatfm.extractor.musicfm, lora_init, lora_rank, lora_alpha)
 
